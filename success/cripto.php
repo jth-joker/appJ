@@ -58,7 +58,12 @@ if (
     http_response_code(200);
     exit('Invalid token');
 }
-$invoice = $_SESSION['pending_invoice'][$token];
+// çekilen token üzerinden fatura verisini al ve doğrula
+$invoice = $_SESSION['pending_invoice'][$token] ?? null;
+if (!is_array($invoice)) {
+    http_response_code(200);
+    exit('Invalid token');
+}
 
 // 15 dk timeout
 if ((time() - ($invoice['created_at'] ?? 0)) > 900) {
@@ -133,6 +138,8 @@ function logSuccessPayment(
 ) {
     $meta = [
         'source'         => 'coinremitter',
+        'token'          => $token,
+        'username'       => $invoice['username'] ?? null,
         'invoice_id'     => $data['data']['invoice_id'] ?? null,
         'coin'           => $data['data']['coin'] ?? 'BTC',
         'amount_try'     => $data['data']['amount_try'] ?? null,

@@ -11,6 +11,10 @@
  * 6. Tutar & para birimi tutarlılık kontrolü
  */
 
+// database bağlantısı ve gerekirse oturum (hash log için)
+require_once __DIR__ . '/../database.php';
+session_start();
+
 header('Content-Type: application/json');
 header('X-Content-Type-Options: nosniff');
 
@@ -77,29 +81,25 @@ if (!hash_equals($expected_hash, $data['verify_hash'])) {
     exit;
 }
 // --------------- 5. Duplicate İşlem Kontrolü (Replay Attack Önleme) ---------------
-require_once '../../database.php'; // mysqli bağlantın
-
+// invoice_id daha önce zorunlu alanlar içinde garantilendi
 $invoice_id = $data['invoice_id'];
+$status     = $data['status'];
 
-$stmt = $db->prepare("SELECT 1 FROM jetonkod WHERE invoice_id = ? LIMIT 1");
+// veritabanında aynı invoice_id ile daha önce işlem yapılmış mı ?
+$stmt = $db->prepare("SELECT COUNT(*) FROM jetonkod WHERE invoice_id = ?");
 $stmt->bind_param('s', $invoice_id);
 $stmt->execute();
-$result = $stmt->get_result();
-
-if ($result->num_rows > 0) {
-    $stmt->close();
-    echo json_encode(['status' => 'already_processed', 'message' => 'Invoice already handled']);
-    exit;
-}
+$stmt->bind_result($cnt);
+$stmt->fetch();
 $stmt->close();
 
-// --------------- 6. Status Kontrolü ---------------
-if ($data['status'] !== 'completed') {
-    // Diğer durumlar için log atabilirsin (mismatched, cancelled, expired vs.)
-    echo json_encode(['status' => 'ignored', 'message' => 'Status is not completed']);
+if ($cnt > 0) {
+    // tekrar eden webhook, sorunsuz bir cevap dön
+    http_response_code(200);
+    echo json_encode(['status' => 'ok', 'message' => 'Duplicate invoice']);
     exit;
 }
-// --------------- 7. order_name Parse + Tutar Doğrulama ---------------
+// --------------- 6. order_name Parse + Tutar Doğrulama ---------------
 $orderParts = array_map('trim', explode('|', $data['order_name']));
 if (count($orderParts) < 2) {
     http_response_code(400);
@@ -199,4 +199,36 @@ else {
 }
 echo json_encode(['status' => 'ok', 'message' => 'Balance updated']);
 }
+
+// --------------- 9. Ödeme kaydı (success log) ---------------
+$logMeta = [
+    'order_name' => $data['order_name'],
+    'psys_cid'   => $data['psys_cid'] ?? null,
+    'txn_id'     => $data['txn_id'] ?? null,
+    'type'       => $is_code_order ? 'code' : 'plisio',
+    'ip'         => $_SERVER['REMOTE_ADDR'] ?? 'unknown'
+];
+logPlisioPayment($db, $invoice_id, $amount, $logMeta);
+
 exit;
+
+// --------------- ÖDEME LOG FONKSİYONU ---------------
+function logPlisioPayment(PDO $db, string $hash, float $tutar, array $meta)
+{
+    try {
+        $stmt = $db->prepare("
+            INSERT INTO payments
+            (hash, odeme_yontemi, tarih, durum, tutar, meta)
+            VALUES
+            (:hash, 3, NOW(), 1, :tutar, :meta)
+        ");
+        $stmt->execute([
+            ':hash'  => $hash,
+            ':tutar' => $tutar,
+            ':meta'  => json_encode($meta, JSON_UNESCAPED_UNICODE)
+        ]);
+    } catch (Exception $e) {
+        error_log('Plisio log error: ' . $e->getMessage());
+    }
+}
+
